@@ -9,23 +9,39 @@
 <body>
   <div id="viewer-container"></div>
 
+  <!-- Top toolbar -->
   <div id="ui">
     <div id="toolbar">
-      <span id="logo">&#9679; 360° Viewer</span>
+      <span id="logo">&#9679; 360&#xB0; Viewer</span>
       <div id="toolbar-actions">
         <button id="autorotate-btn" class="toolbar-btn active" title="Toggle auto-rotate">
           &#8635; Auto-rotate
         </button>
-        <button id="load-btn" class="toolbar-btn">&#128247; Load Image</button>
-        <input type="file" id="file-input" accept="image/*" />
+        <button id="load-btn" class="toolbar-btn">&#128247; Load Images</button>
+        <input type="file" id="file-input" accept="image/*" multiple />
       </div>
     </div>
   </div>
 
-  <div id="hint">Drag to look around &nbsp;·&nbsp; Scroll to zoom</div>
+  <!-- Bottom navigation -->
+  <div id="nav">
+    <button id="prev-btn" class="nav-arrow" aria-label="Previous image">&#8592;</button>
+    <div id="dots">
+      <span class="dot" data-index="0"></span>
+      <span class="dot" data-index="1"></span>
+      <span class="dot" data-index="2"></span>
+    </div>
+    <button id="next-btn" class="nav-arrow" aria-label="Next image">&#8594;</button>
+  </div>
 
+  <!-- Loading spinner -->
+  <div id="loading-overlay">
+    <div id="spinner"></div>
+  </div>
+
+  <!-- Drag-and-drop overlay -->
   <div id="dropzone-overlay">
-    <div id="dropzone-label">Drop your 360° image here</div>
+    <div id="dropzone-label">Drop up to 3 images here</div>
   </div>
 
   <script type="importmap">

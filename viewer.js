@@ -11,31 +11,35 @@ const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
 camera.rotation.order = 'YXZ';
 
-// ── Panorama sphere ────────────────────────────────────────────────────────────
-// Scale(-1,1,1) flips normals inward so the texture is visible from inside.
+// ── Panorama sphere (normals flipped inward) ───────────────────────────────────
 const geometry = new THREE.SphereGeometry(500, 64, 32);
 geometry.scale(-1, 1, 1);
-
 const material = new THREE.MeshBasicMaterial({ map: buildPlaceholderTexture() });
 const sphere = new THREE.Mesh(geometry, material);
 scene.add(sphere);
 
+// ── Image slots ────────────────────────────────────────────────────────────────
+// Each slot stores the blob URL. We only keep ONE decoded THREE.Texture in GPU
+// memory at a time — the rest stay as cheap blob URLs until needed.
+const MAX_IMAGES = 3;
+const slots = [null, null, null]; // blob URL strings
+let currentIndex = 0;
+let isLoading = false;
+
 // ── Camera state ───────────────────────────────────────────────────────────────
-const rot = { x: 0, y: 0 };      // current (smoothed)
-const target = { x: 0, y: 0 };   // desired
-const fov = { cur: 75, tgt: 75, min: 20, max: 105 };
-const SMOOTH = 0.10;
-const ROT_SPEED = 0.0030;
+const rot    = { x: 0, y: 0 };
+const target = { x: 0, y: 0 };
+const fov    = { cur: 75, tgt: 75, min: 20, max: 105 };
+const SMOOTH     = 0.10;
+const ROT_SPEED  = 0.0030;
 const ZOOM_SPEED = 0.08;
 
-// ── Auto-rotate ────────────────────────────────────────────────────────────────
 let autoRotate = true;
 const AUTO_ROT_SPEED = 0.0003;
 
 // ── Mouse drag ────────────────────────────────────────────────────────────────
 let dragging = false;
 let lastX = 0, lastY = 0;
-
 const cv = renderer.domElement;
 cv.style.cursor = 'grab';
 
@@ -60,7 +64,6 @@ window.addEventListener('mousemove', e => {
   target.y -= dx * ROT_SPEED;
   target.x -= dy * ROT_SPEED;
   target.x = clamp(target.x, -Math.PI / 2, Math.PI / 2);
-  showHintBriefly();
 });
 
 // ── Scroll / pinch zoom ────────────────────────────────────────────────────────
@@ -101,30 +104,118 @@ cv.addEventListener('touchmove', e => {
   }
 }, { passive: false });
 
-// ── Keyboard arrow / WASD ─────────────────────────────────────────────────────
+// ── Keyboard ──────────────────────────────────────────────────────────────────
 const keys = new Set();
-window.addEventListener('keydown', e => keys.add(e.key));
+window.addEventListener('keydown', e => {
+  keys.add(e.key);
+  if (e.key === 'ArrowLeft'  && !e.ctrlKey && !e.metaKey) navigateTo(currentIndex - 1);
+  if (e.key === 'ArrowRight' && !e.ctrlKey && !e.metaKey) navigateTo(currentIndex + 1);
+});
 window.addEventListener('keyup', e => keys.delete(e.key));
 
 function applyKeyboard() {
   const step = 0.018;
-  if (keys.has('ArrowLeft')  || keys.has('a') || keys.has('A')) target.y += step;
-  if (keys.has('ArrowRight') || keys.has('d') || keys.has('D')) target.y -= step;
-  if (keys.has('ArrowUp')    || keys.has('w') || keys.has('W')) target.x = clamp(target.x + step, -Math.PI / 2, Math.PI / 2);
-  if (keys.has('ArrowDown')  || keys.has('s') || keys.has('S')) target.x = clamp(target.x - step, -Math.PI / 2, Math.PI / 2);
+  if (keys.has('a') || keys.has('A')) target.y += step;
+  if (keys.has('d') || keys.has('D')) target.y -= step;
+  if (keys.has('w') || keys.has('W')) target.x = clamp(target.x + step, -Math.PI / 2, Math.PI / 2);
+  if (keys.has('s') || keys.has('S')) target.x = clamp(target.x - step, -Math.PI / 2, Math.PI / 2);
+}
+
+// ── Navigation ────────────────────────────────────────────────────────────────
+const navEl   = document.getElementById('nav');
+const prevBtn = document.getElementById('prev-btn');
+const nextBtn = document.getElementById('next-btn');
+const dotEls  = Array.from(document.querySelectorAll('.dot'));
+
+prevBtn.addEventListener('click', () => navigateTo(currentIndex - 1));
+nextBtn.addEventListener('click', () => navigateTo(currentIndex + 1));
+dotEls.forEach(dot => dot.addEventListener('click', () => navigateTo(Number(dot.dataset.index))));
+
+function navigateTo(index) {
+  const filled = slots.filter(Boolean).length;
+  if (filled < 2 || isLoading) return;
+  // Wrap around within the loaded range only
+  const maxLoaded = filled - 1;
+  index = ((index % filled) + filled) % filled;
+  if (index === currentIndex) return;
+  currentIndex = index;
+  applyCurrentSlot();
+}
+
+function applyCurrentSlot() {
+  const url = slots[currentIndex];
+  if (!url) return;
+
+  showLoading(true);
+  // Dispose the old texture to free GPU memory before loading the next one
+  if (material.map && material.map.isCanvasTexture === undefined) {
+    material.map.dispose();
+  }
+
+  new THREE.TextureLoader().load(
+    url,
+    tex => {
+      material.map = tex;
+      material.needsUpdate = true;
+      showLoading(false);
+      updateNav();
+    },
+    undefined,
+    () => showLoading(false)
+  );
+}
+
+function updateNav() {
+  const filled = slots.filter(Boolean).length;
+  navEl.classList.toggle('visible', filled >= 2);
+
+  dotEls.forEach((dot, i) => {
+    dot.classList.toggle('loaded', Boolean(slots[i]));
+    dot.classList.toggle('active', i === currentIndex);
+    // Hide dots for slots that will never be used if < 3 images loaded
+    dot.style.display = (i < MAX_IMAGES) ? '' : 'none';
+  });
+
+  // Dim dots for empty slots
+  dotEls.forEach((dot, i) => {
+    dot.style.opacity = slots[i] ? '1' : '0.25';
+  });
+
+  prevBtn.disabled = false;
+  nextBtn.disabled = false;
 }
 
 // ── File loading ───────────────────────────────────────────────────────────────
-const loadBtn  = document.getElementById('load-btn');
+const loadBtn   = document.getElementById('load-btn');
 const fileInput = document.getElementById('file-input');
 
 loadBtn.addEventListener('click', () => fileInput.click());
 
 fileInput.addEventListener('change', e => {
-  const file = e.target.files[0];
-  if (file) loadImageFile(file);
+  handleFiles(Array.from(e.target.files));
   fileInput.value = '';
 });
+
+function handleFiles(files) {
+  // Accept up to MAX_IMAGES; fill slots starting from the first empty one,
+  // or overwrite from slot 0 if all are already filled.
+  const imageFiles = files.filter(f => f.type.startsWith('image/')).slice(0, MAX_IMAGES);
+  if (!imageFiles.length) return;
+
+  // Revoke old blob URLs to release memory before replacing
+  const firstEmpty = slots.findIndex(s => !s);
+  const startSlot  = firstEmpty === -1 ? 0 : firstEmpty;
+
+  imageFiles.forEach((file, i) => {
+    const slotIndex = (startSlot + i) % MAX_IMAGES;
+    if (slots[slotIndex]) URL.revokeObjectURL(slots[slotIndex]);
+    slots[slotIndex] = URL.createObjectURL(file);
+  });
+
+  // Jump to the first newly loaded slot and display it
+  currentIndex = startSlot % MAX_IMAGES;
+  applyCurrentSlot();
+}
 
 // ── Drag-and-drop ──────────────────────────────────────────────────────────────
 const dropOverlay = document.getElementById('dropzone-overlay');
@@ -147,8 +238,7 @@ document.addEventListener('drop', e => {
   e.preventDefault();
   dragCounter = 0;
   dropOverlay.classList.remove('active');
-  const file = e.dataTransfer.files[0];
-  if (file && file.type.startsWith('image/')) loadImageFile(file);
+  handleFiles(Array.from(e.dataTransfer.files));
 });
 
 // ── Auto-rotate toggle ─────────────────────────────────────────────────────────
@@ -165,28 +255,20 @@ window.addEventListener('resize', () => {
   renderer.setSize(window.innerWidth, window.innerHeight);
 });
 
-// ── Hint auto-hide ─────────────────────────────────────────────────────────────
-const hint = document.getElementById('hint');
-let hintTimer = null;
+// ── Loading overlay ────────────────────────────────────────────────────────────
+const loadingOverlay = document.getElementById('loading-overlay');
 
-function showHintBriefly() {
-  hint.classList.remove('hidden');
-  clearTimeout(hintTimer);
-  hintTimer = setTimeout(() => hint.classList.add('hidden'), 3000);
+function showLoading(on) {
+  isLoading = on;
+  loadingOverlay.classList.toggle('visible', on);
 }
-
-// Hide hint after 5 seconds on first load
-setTimeout(() => hint.classList.add('hidden'), 5000);
 
 // ── Animation loop ─────────────────────────────────────────────────────────────
 function animate() {
   requestAnimationFrame(animate);
-
   applyKeyboard();
 
-  if (autoRotate && !dragging) {
-    target.y -= AUTO_ROT_SPEED;
-  }
+  if (autoRotate && !dragging) target.y -= AUTO_ROT_SPEED;
 
   rot.x += (target.x - rot.x) * SMOOTH;
   rot.y += (target.y - rot.y) * SMOOTH;
@@ -213,24 +295,13 @@ function pinchDist(e) {
   );
 }
 
-function loadImageFile(file) {
-  const url = URL.createObjectURL(file);
-  new THREE.TextureLoader().load(url, tex => {
-    material.map = tex;
-    material.needsUpdate = true;
-    URL.revokeObjectURL(url);
-  });
-}
-
 // ── Placeholder texture ────────────────────────────────────────────────────────
 function buildPlaceholderTexture() {
   const W = 2048, H = 1024;
   const canvas = document.createElement('canvas');
-  canvas.width = W;
-  canvas.height = H;
+  canvas.width = W; canvas.height = H;
   const ctx = canvas.getContext('2d');
 
-  // Sky
   const sky = ctx.createLinearGradient(0, 0, 0, H * 0.58);
   sky.addColorStop(0,   '#0b0f1a');
   sky.addColorStop(0.5, '#0d1b3e');
@@ -238,14 +309,12 @@ function buildPlaceholderTexture() {
   ctx.fillStyle = sky;
   ctx.fillRect(0, 0, W, H * 0.58);
 
-  // Ground
   const ground = ctx.createLinearGradient(0, H * 0.58, 0, H);
   ground.addColorStop(0, '#1c3a10');
   ground.addColorStop(1, '#0e1f08');
   ctx.fillStyle = ground;
   ctx.fillRect(0, H * 0.58, W, H * 0.42);
 
-  // Horizon glow
   const glow = ctx.createLinearGradient(0, H * 0.46, 0, H * 0.68);
   glow.addColorStop(0,   'transparent');
   glow.addColorStop(0.4, 'rgba(255,120,40,0.18)');
@@ -254,55 +323,39 @@ function buildPlaceholderTexture() {
   ctx.fillStyle = glow;
   ctx.fillRect(0, H * 0.46, W, H * 0.22);
 
-  // Stars
   const rng = mulberry32(42);
   for (let i = 0; i < 320; i++) {
-    const x = rng() * W;
-    const y = rng() * H * 0.54;
-    const r = rng() * 1.6 + 0.3;
-    const alpha = rng() * 0.6 + 0.4;
+    const x = rng() * W, y = rng() * H * 0.54;
+    const r = rng() * 1.6 + 0.3, a = rng() * 0.6 + 0.4;
     ctx.beginPath();
     ctx.arc(x, y, r, 0, Math.PI * 2);
-    ctx.fillStyle = `rgba(255,255,255,${alpha.toFixed(2)})`;
+    ctx.fillStyle = `rgba(255,255,255,${a.toFixed(2)})`;
     ctx.fill();
   }
 
-  // Grid lines on ground for depth cue
   ctx.strokeStyle = 'rgba(80,160,60,0.15)';
   ctx.lineWidth = 1;
   for (let i = 0; i < 20; i++) {
     const x = (i / 20) * W;
-    ctx.beginPath();
-    ctx.moveTo(x, H * 0.58);
-    ctx.lineTo(W / 2, H);
-    ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(x, H * 0.58); ctx.lineTo(W / 2, H); ctx.stroke();
   }
   for (let j = 0; j < 8; j++) {
     const y = H * 0.58 + (j / 8) * H * 0.42;
-    ctx.beginPath();
-    ctx.moveTo(0, y);
-    ctx.lineTo(W, y);
-    ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
   }
 
-  // Centre instructions
-  drawText(ctx, 'Load a 360° panoramic image', W / 2, H / 2 - 14, 'bold 40px sans-serif', 'rgba(255,255,255,0.80)');
-  drawText(ctx, 'Click "Load Image" or drag & drop a file here', W / 2, H / 2 + 40, '26px sans-serif', 'rgba(255,255,255,0.45)');
+  drawText(ctx, 'Load up to 3 panoramic images', W / 2, H / 2 - 14, 'bold 40px sans-serif', 'rgba(255,255,255,0.80)');
+  drawText(ctx, 'Click “Load Images” or drag & drop up to 3 files', W / 2, H / 2 + 44, '26px sans-serif', 'rgba(255,255,255,0.45)');
 
   return new THREE.CanvasTexture(canvas);
 }
 
 function drawText(ctx, text, x, y, font, color) {
-  ctx.font = font;
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.fillStyle = 'rgba(0,0,0,0.4)';
-  ctx.fillText(text, x + 2, y + 2);
-  ctx.fillStyle = color;
-  ctx.fillText(text, x, y);
+  ctx.font = font; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillStyle = 'rgba(0,0,0,0.4)'; ctx.fillText(text, x + 2, y + 2);
+  ctx.fillStyle = color; ctx.fillText(text, x, y);
 }
 
-// Deterministic seeded RNG (Mulberry32) for consistent star placement
 function mulberry32(seed) {
   return function () {
     seed |= 0; seed = seed + 0x6d2b79f5 | 0;

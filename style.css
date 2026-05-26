@@ -76,25 +76,114 @@ body {
   color: #90cdf4;
 }
 
-/* ── Bottom hint ─────────────────────────────────────── */
-#hint {
+/* ── Bottom navigation ───────────────────────────────── */
+#nav {
   position: fixed;
-  bottom: 22px;
+  bottom: 28px;
   left: 50%;
   transform: translateX(-50%);
-  color: rgba(255, 255, 255, 0.55);
-  font-size: 12.5px;
-  background: rgba(0, 0, 0, 0.45);
-  padding: 6px 16px;
-  border-radius: 20px;
-  pointer-events: none;
-  backdrop-filter: blur(6px);
+  display: flex;
+  align-items: center;
+  gap: 18px;
   z-index: 10;
-  transition: opacity 0.5s;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.3s;
 }
 
-#hint.hidden {
+#nav.visible {
+  opacity: 1;
+  pointer-events: all;
+}
+
+.nav-arrow {
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  font-size: 20px;
+  cursor: pointer;
+  backdrop-filter: blur(8px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.18s, border-color 0.18s, transform 0.12s;
+  line-height: 1;
+}
+
+.nav-arrow:hover {
+  background: rgba(255, 255, 255, 0.18);
+  border-color: rgba(255, 255, 255, 0.6);
+}
+
+.nav-arrow:active {
+  transform: scale(0.92);
+}
+
+.nav-arrow:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+
+/* Dots */
+#dots {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.3);
+  border: 1px solid rgba(255, 255, 255, 0.5);
+  transition: background 0.2s, transform 0.2s;
+  cursor: pointer;
+}
+
+.dot.loaded {
+  background: rgba(255, 255, 255, 0.55);
+}
+
+.dot.active {
+  background: #fff;
+  transform: scale(1.25);
+  border-color: #fff;
+}
+
+/* ── Loading spinner ─────────────────────────────────── */
+#loading-overlay {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.5);
+  z-index: 50;
   opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.2s;
+}
+
+#loading-overlay.visible {
+  opacity: 1;
+  pointer-events: all;
+}
+
+#spinner {
+  width: 44px;
+  height: 44px;
+  border: 3px solid rgba(255, 255, 255, 0.2);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: spin 0.75s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
 }
 
 /* ── Drag-and-drop overlay ───────────────────────────── */

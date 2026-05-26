@@ -9,7 +9,9 @@ const root = __dirname;
 
 const css    = fs.readFileSync(path.join(root, 'style.css'), 'utf8');
 let   viewer = fs.readFileSync(path.join(root, 'viewer.js'), 'utf8');
-let   three  = fs.readFileSync(path.join(root, 'vendor/three.module.min.js'), 'utf8');
+// Use the UMD build — designed for plain <script> tags, sets window.THREE automatically.
+// (three.module.min.js is an ES-module build and breaks when inlined as a plain script.)
+let   three  = fs.readFileSync(path.join(root, 'vendor/three.umd.min.js'), 'utf8');
 
 // ── Embed the 3 panorama images as base64 data URIs ───────────────────────────
 const IMAGE_FILES = [
@@ -31,11 +33,6 @@ viewer = viewer.replace(
   /const DEFAULT_IMAGES = \[[\s\S]*?\];/,
   `const DEFAULT_IMAGES = ['#pano-0', '#pano-1', '#pano-2'];`
 );
-
-// ── Convert Three.js ES-module export to a plain const ────────────────────────
-// three.module.min.js ends with: export{Foo,Bar,...};
-// We turn that into: const THREE={Foo,Bar,...};
-three = three.replace(/export\{/, 'const THREE={');
 
 // ── Strip the import line from viewer.js ──────────────────────────────────────
 viewer = viewer.replace(/^import \* as THREE from ['"]three['"];\n?/m, '');

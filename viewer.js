@@ -1,5 +1,17 @@
 import * as THREE from 'three';
 
+// ── WebGL availability check ───────────────────────────────────────────────────
+(function () {
+  try {
+    const c = document.createElement('canvas');
+    if (!c.getContext('webgl') && !c.getContext('webgl2')) throw new Error();
+  } catch (e) {
+    const el = document.getElementById('webgl-error');
+    if (el) el.style.display = 'flex';
+    throw new Error('WebGL not supported');
+  }
+})();
+
 // ── Renderer / scene / camera ──────────────────────────────────────────────────
 const container = document.getElementById('viewer-container');
 const renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -149,26 +161,38 @@ function navigateTo(index) {
 }
 
 function applyCurrentSlot() {
-  const url = slots[currentIndex];
-  if (!url) return;
+  const src = slots[currentIndex];
+  if (!src) return;
 
   showLoading(true);
-  // Reset view angle when switching images
   target.x = 0; target.y = 0;
 
-  new THREE.TextureLoader().load(
-    url,
-    tex => {
-      if (activeTexture) activeTexture.dispose();
-      activeTexture = tex;
-      material.map = tex;
-      material.needsUpdate = true;
-      showLoading(false);
-      updateNav();
-    },
-    undefined,
-    () => showLoading(false)
-  );
+  // '#id' means a pre-rendered <img> element baked into the offline build.
+  // Using new THREE.Texture(imgEl) avoids XHR/fetch which is blocked on
+  // Android content:// and file:// origins.
+  const isElemRef = src.startsWith('#');
+
+  function applyImg(img) {
+    if (activeTexture) activeTexture.dispose();
+    activeTexture = new THREE.Texture(img);
+    activeTexture.needsUpdate = true;
+    material.map = activeTexture;
+    material.needsUpdate = true;
+    showLoading(false);
+    updateNav();
+  }
+
+  if (isElemRef) {
+    const img = document.querySelector(src);
+    if (!img) { showLoading(false); return; }
+    if (img.complete && img.naturalWidth) { applyImg(img); }
+    else { img.onload = () => applyImg(img); img.onerror = () => showLoading(false); }
+  } else {
+    const img = new Image();
+    img.onload  = () => applyImg(img);
+    img.onerror = () => showLoading(false);
+    img.src = src;
+  }
 }
 
 function updateNav() {

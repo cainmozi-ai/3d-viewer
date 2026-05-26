@@ -18,15 +18,18 @@ const IMAGE_FILES = [
   'VR RENDER EXPERIENCE SIGNAL LOST ARCHIVE2846.png',
 ];
 
+// Images are embedded as hidden <img> elements — the browser decodes them
+// natively without any XHR/fetch, which is what makes this work on Android
+// content:// and file:// origins. We reference them by CSS selector in JS.
 const dataURIs = IMAGE_FILES.map(filename => {
   const buf = fs.readFileSync(path.join(root, filename));
   return `data:image/png;base64,${buf.toString('base64')}`;
 });
 
-// Replace the DEFAULT_IMAGES array in viewer.js with the embedded data URIs
+// Point DEFAULT_IMAGES at the element IDs we'll create in the HTML
 viewer = viewer.replace(
   /const DEFAULT_IMAGES = \[[\s\S]*?\];/,
-  `const DEFAULT_IMAGES = [\n  '${dataURIs.join("',\n  '")}'\n];`
+  `const DEFAULT_IMAGES = ['#pano-0', '#pano-1', '#pano-2'];`
 );
 
 // ── Convert Three.js ES-module export to a plain const ────────────────────────
@@ -80,7 +83,21 @@ ${css}
     <div id="dropzone-label">Drop up to 3 images here</div>
   </div>
 
-  <script type="module">
+  <!-- Pre-decoded panorama images. Using <img> src avoids XHR so this works
+       on Android content:// and file:// origins. -->
+  <img id="pano-0" src="${dataURIs[0]}" style="display:none" crossorigin="anonymous" />
+  <img id="pano-1" src="${dataURIs[1]}" style="display:none" crossorigin="anonymous" />
+  <img id="pano-2" src="${dataURIs[2]}" style="display:none" crossorigin="anonymous" />
+
+  <div id="webgl-error" style="display:none;position:fixed;inset:0;background:#111;color:#fff;display:none;align-items:center;justify-content:center;text-align:center;padding:24px;font-family:sans-serif;z-index:999">
+    <div>
+      <div style="font-size:48px;margin-bottom:16px">&#9888;</div>
+      <div style="font-size:20px;font-weight:600;margin-bottom:8px">WebGL not available</div>
+      <div style="font-size:14px;opacity:0.6">Try opening this file in Chrome or Firefox</div>
+    </div>
+  </div>
+
+  <script>
 /* ── Three.js r160 (minified, inlined) ────────────────────────────── */
 ${three}
 

@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>3D Image Viewer</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div id="viewer-container"></div>
+
+  <div id="ui">
+    <div id="toolbar">
+      <span id="logo">&#9679; 360° Viewer</span>
+      <div id="toolbar-actions">
+        <button id="autorotate-btn" class="toolbar-btn active" title="Toggle auto-rotate">
+          &#8635; Auto-rotate
+        </button>
+        <button id="load-btn" class="toolbar-btn">&#128247; Load Image</button>
+        <input type="file" id="file-input" accept="image/*" />
+      </div>
+    </div>
+  </div>
+
+  <div id="hint">Drag to look around &nbsp;·&nbsp; Scroll to zoom</div>
+
+  <div id="dropzone-overlay">
+    <div id="dropzone-label">Drop your 360° image here</div>
+  </div>
+
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
+    }
+  }
+  </script>
+  <script type="module" src="viewer.js"></script>
+</body>
+</html>

@@ -1,192 +1,191 @@
-import * as THREE from 'three';
+// Raw WebGL 360° panoramic viewer — no dependencies
 
-// ── WebGL availability check ───────────────────────────────────────────────────
-(function () {
-  try {
-    const c = document.createElement('canvas');
-    if (!c.getContext('webgl') && !c.getContext('webgl2')) throw new Error();
-  } catch (e) {
-    const el = document.getElementById('webgl-error');
-    if (el) el.style.display = 'flex';
-    throw new Error('WebGL not supported');
+// ── Canvas + WebGL context ─────────────────────────────────────────────────────
+const canvas = document.createElement('canvas');
+canvas.style.cssText = 'position:fixed;inset:0;width:100%;height:100%;display:block;touch-action:none';
+document.getElementById('viewer-container').appendChild(canvas);
+canvas.width  = window.innerWidth;
+canvas.height = window.innerHeight;
+
+const gl = canvas.getContext('webgl', { antialias: false }) ||
+           canvas.getContext('experimental-webgl', { antialias: false });
+
+if (!gl) {
+  const err = document.getElementById('webgl-error');
+  if (err) err.style.display = 'flex';
+  throw new Error('WebGL not available');
+}
+
+// ── Shaders ────────────────────────────────────────────────────────────────────
+const VS = `
+  attribute vec3 aPos;
+  attribute vec2 aUV;
+  uniform mat4 uMVP;
+  varying vec2 vUV;
+  void main() {
+    gl_Position = uMVP * vec4(aPos, 1.0);
+    vUV = aUV;
+  }`;
+
+const FS = `
+  precision mediump float;
+  uniform sampler2D uTex;
+  varying vec2 vUV;
+  void main() {
+    gl_FragColor = texture2D(uTex, vUV);
+  }`;
+
+function compileShader(type, src) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src);
+  gl.compileShader(s);
+  return s;
+}
+
+const prog = gl.createProgram();
+gl.attachShader(prog, compileShader(gl.VERTEX_SHADER, VS));
+gl.attachShader(prog, compileShader(gl.FRAGMENT_SHADER, FS));
+gl.linkProgram(prog);
+gl.useProgram(prog);
+
+const aPos = gl.getAttribLocation(prog, 'aPos');
+const aUV  = gl.getAttribLocation(prog, 'aUV');
+const uMVP = gl.getUniformLocation(prog, 'uMVP');
+const uTex = gl.getUniformLocation(prog, 'uTex');
+
+// ── Sphere geometry (inside-out so texture faces inward) ───────────────────────
+(function buildSphere() {
+  const H = 64, V = 32; // horizontal / vertical segments
+  const pos = [], uvs = [], idx = [];
+
+  for (let i = 0; i <= V; i++) {
+    const phi = (i / V) * Math.PI;
+    for (let j = 0; j <= H; j++) {
+      const theta = (j / H) * 2 * Math.PI;
+      // Negate X to flip normals inward
+      pos.push(-Math.sin(phi) * Math.cos(theta), Math.cos(phi), Math.sin(phi) * Math.sin(theta));
+      uvs.push(j / H, 1 - i / V);
+    }
   }
+
+  for (let i = 0; i < V; i++) {
+    for (let j = 0; j < H; j++) {
+      const a = i * (H + 1) + j, b = a + H + 1;
+      idx.push(a, b, a + 1, b, b + 1, a + 1);
+    }
+  }
+
+  const pb = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, pb);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(pos), gl.STATIC_DRAW);
+  window._spherePosBuf = pb;
+
+  const ub = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, ub);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(uvs), gl.STATIC_DRAW);
+  window._sphereUVBuf = ub;
+
+  const ib = gl.createBuffer();
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ib);
+  gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(idx), gl.STATIC_DRAW);
+  window._sphereIdxBuf = ib;
+  window._sphereIdxCount = idx.length;
 })();
 
-// ── Renderer / scene / camera ──────────────────────────────────────────────────
-const container = document.getElementById('viewer-container');
-const renderer = new THREE.WebGLRenderer({ antialias: true });
-renderer.setPixelRatio(window.devicePixelRatio);
-renderer.setSize(window.innerWidth, window.innerHeight);
-container.appendChild(renderer.domElement);
+// ── Matrix helpers ─────────────────────────────────────────────────────────────
+function mat4Mul(a, b) {
+  const o = new Float32Array(16);
+  for (let r = 0; r < 4; r++)
+    for (let c = 0; c < 4; c++) {
+      let s = 0;
+      for (let k = 0; k < 4; k++) s += a[r + k * 4] * b[k + c * 4];
+      o[r + c * 4] = s;
+    }
+  return o;
+}
 
-const scene = new THREE.Scene();
-const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
-camera.rotation.order = 'YXZ';
+function perspective(fovDeg, aspect, near, far) {
+  const f = 1 / Math.tan(fovDeg * Math.PI / 360);
+  const o = new Float32Array(16);
+  o[0]  = f / aspect;
+  o[5]  = f;
+  o[10] = (far + near) / (near - far);
+  o[11] = -1;
+  o[14] = 2 * far * near / (near - far);
+  return o;
+}
 
-// ── Panorama sphere (normals flipped inward) ───────────────────────────────────
-const geometry = new THREE.SphereGeometry(500, 64, 32);
-geometry.scale(-1, 1, 1);
-const material = new THREE.MeshBasicMaterial({ map: buildPlaceholderTexture() });
-const sphere = new THREE.Mesh(geometry, material);
-scene.add(sphere);
+// Rotation Ry * Rx stored in column-major order
+function viewMatrix(ry, rx) {
+  const cx = Math.cos(rx), sx = Math.sin(rx);
+  const cy = Math.cos(ry), sy = Math.sin(ry);
+  const o = new Float32Array(16);
+  o[0]=cy;      o[4]=sy*sx;   o[8] =sy*cx;  o[12]=0;
+  o[1]=0;       o[5]=cx;      o[9] =-sx;    o[13]=0;
+  o[2]=-sy;     o[6]=cy*sx;   o[10]=cy*cx;  o[14]=0;
+  o[3]=0;       o[7]=0;       o[11]=0;      o[15]=1;
+  return o;
+}
 
-// ── Default images — replaced with base64 data URIs in the offline build ───────
+// ── Texture helpers ────────────────────────────────────────────────────────────
+const MAX_TEX = gl.getParameter(gl.MAX_TEXTURE_SIZE);
+
+function imageToTexture(img) {
+  let src = img;
+  if (img.naturalWidth > MAX_TEX || img.naturalHeight > MAX_TEX) {
+    const s = Math.min(MAX_TEX / img.naturalWidth, MAX_TEX / img.naturalHeight);
+    const c = document.createElement('canvas');
+    c.width  = Math.floor(img.naturalWidth  * s);
+    c.height = Math.floor(img.naturalHeight * s);
+    c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+    src = c;
+  }
+  const tex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, src);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  return tex;
+}
+
+// ── Image / slot state ─────────────────────────────────────────────────────────
+// Replaced with embedded data URIs by the offline build script
 const DEFAULT_IMAGES = [
   'VR RENDER EXPERIENCE SIGNAL LOST ARCHIVE0440.png',
   'VR RENDER EXPERIENCE SIGNAL LOST ARCHIVE1771.png',
   'VR RENDER EXPERIENCE SIGNAL LOST ARCHIVE2846.png',
 ];
 
-// ── Image slots ────────────────────────────────────────────────────────────────
-// Slots hold a URL (path, blob URL, or data URI). Only one THREE.Texture lives
-// in GPU memory at a time; the old one is disposed before loading the next.
-const MAX_IMAGES = 3;
 const slots = [null, null, null];
-let currentIndex = 0;
-let isLoading = false;
-let activeTexture = null; // the THREE.Texture currently mapped to the sphere
+let currentIndex  = 0;
+let activeTexture = null;
+let isLoading     = false;
 
-// ── Camera state ───────────────────────────────────────────────────────────────
-const rot    = { x: 0, y: 0 };
-const target = { x: 0, y: 0 };
-const fov    = { cur: 75, tgt: 75, min: 20, max: 105 };
-const SMOOTH     = 0.10;
-const ROT_SPEED  = 0.0030;
-const ZOOM_SPEED = 0.08;
-
-let autoRotate = true;
-const AUTO_ROT_SPEED = 0.0003;
-
-// ── Mouse drag ────────────────────────────────────────────────────────────────
-let dragging = false;
-let lastX = 0, lastY = 0;
-const cv = renderer.domElement;
-cv.style.cursor = 'grab';
-
-cv.addEventListener('mousedown', e => {
-  dragging = true;
-  lastX = e.clientX;
-  lastY = e.clientY;
-  cv.style.cursor = 'grabbing';
-});
-
-window.addEventListener('mouseup', () => {
-  dragging = false;
-  cv.style.cursor = 'grab';
-});
-
-window.addEventListener('mousemove', e => {
-  if (!dragging) return;
-  const dx = e.clientX - lastX;
-  const dy = e.clientY - lastY;
-  lastX = e.clientX;
-  lastY = e.clientY;
-  target.y -= dx * ROT_SPEED;
-  target.x -= dy * ROT_SPEED;
-  target.x = clamp(target.x, -Math.PI / 2, Math.PI / 2);
-});
-
-// ── Scroll / pinch zoom ────────────────────────────────────────────────────────
-cv.addEventListener('wheel', e => {
-  e.preventDefault();
-  fov.tgt += e.deltaY * 0.05;
-  fov.tgt = clamp(fov.tgt, fov.min, fov.max);
-}, { passive: false });
-
-// ── Touch ─────────────────────────────────────────────────────────────────────
-let lastTouchX = 0, lastTouchY = 0, lastPinchDist = 0;
-
-cv.addEventListener('touchstart', e => {
-  e.preventDefault();
-  if (e.touches.length === 1) {
-    lastTouchX = e.touches[0].clientX;
-    lastTouchY = e.touches[0].clientY;
-  } else if (e.touches.length === 2) {
-    lastPinchDist = pinchDist(e);
-  }
-}, { passive: false });
-
-cv.addEventListener('touchmove', e => {
-  e.preventDefault();
-  if (e.touches.length === 1) {
-    const dx = e.touches[0].clientX - lastTouchX;
-    const dy = e.touches[0].clientY - lastTouchY;
-    lastTouchX = e.touches[0].clientX;
-    lastTouchY = e.touches[0].clientY;
-    target.y -= dx * ROT_SPEED;
-    target.x -= dy * ROT_SPEED;
-    target.x = clamp(target.x, -Math.PI / 2, Math.PI / 2);
-  } else if (e.touches.length === 2) {
-    const d = pinchDist(e);
-    fov.tgt += (lastPinchDist - d) * 0.15;
-    fov.tgt = clamp(fov.tgt, fov.min, fov.max);
-    lastPinchDist = d;
-  }
-}, { passive: false });
-
-// ── Keyboard — WASD pans; left/right arrows switch images ─────────────────────
-const keys = new Set();
-window.addEventListener('keydown', e => {
-  keys.add(e.key);
-  if (e.key === 'ArrowLeft')  navigateTo(currentIndex - 1);
-  if (e.key === 'ArrowRight') navigateTo(currentIndex + 1);
-});
-window.addEventListener('keyup', e => keys.delete(e.key));
-
-function applyKeyboard() {
-  const step = 0.018;
-  if (keys.has('a') || keys.has('A')) target.y += step;
-  if (keys.has('d') || keys.has('D')) target.y -= step;
-  if (keys.has('w') || keys.has('W')) target.x = clamp(target.x + step, -Math.PI / 2, Math.PI / 2);
-  if (keys.has('s') || keys.has('S')) target.x = clamp(target.x - step, -Math.PI / 2, Math.PI / 2);
-}
-
-// ── Navigation ────────────────────────────────────────────────────────────────
-const navEl   = document.getElementById('nav');
-const prevBtn = document.getElementById('prev-btn');
-const nextBtn = document.getElementById('next-btn');
-const dotEls  = Array.from(document.querySelectorAll('.dot'));
-
-prevBtn.addEventListener('click', () => navigateTo(currentIndex - 1));
-nextBtn.addEventListener('click', () => navigateTo(currentIndex + 1));
-dotEls.forEach(dot => dot.addEventListener('click', () => navigateTo(Number(dot.dataset.index))));
-
-function navigateTo(index) {
-  const filled = slots.filter(Boolean).length;
-  if (filled < 2 || isLoading) return;
-  index = ((index % filled) + filled) % filled;
-  if (index === currentIndex) return;
-  currentIndex = index;
-  applyCurrentSlot();
+function applyImg(img) {
+  if (activeTexture) gl.deleteTexture(activeTexture);
+  activeTexture = imageToTexture(img);
+  showLoading(false);
+  updateNav();
 }
 
 function applyCurrentSlot() {
   const src = slots[currentIndex];
   if (!src) return;
-
   showLoading(true);
-  target.x = 0; target.y = 0;
+  targetX = 0; targetY = 0;
 
-  // '#id' means a pre-rendered <img> element baked into the offline build.
-  // Using new THREE.Texture(imgEl) avoids XHR/fetch which is blocked on
-  // Android content:// and file:// origins.
-  const isElemRef = src.startsWith('#');
-
-  function applyImg(img) {
-    if (activeTexture) activeTexture.dispose();
-    activeTexture = new THREE.Texture(img);
-    activeTexture.needsUpdate = true;
-    material.map = activeTexture;
-    material.needsUpdate = true;
-    showLoading(false);
-    updateNav();
-  }
-
-  if (isElemRef) {
+  // '#id' = pre-embedded <img> element (offline build)
+  if (src.startsWith('#')) {
     const img = document.querySelector(src);
     if (!img) { showLoading(false); return; }
-    if (img.complete && img.naturalWidth) { applyImg(img); }
-    else { img.onload = () => applyImg(img); img.onerror = () => showLoading(false); }
+    if (img.complete && img.naturalWidth) {
+      applyImg(img);
+    } else {
+      img.onload  = () => applyImg(img);
+      img.onerror = () => showLoading(false);
+    }
   } else {
     const img = new Image();
     img.onload  = () => applyImg(img);
@@ -195,169 +194,167 @@ function applyCurrentSlot() {
   }
 }
 
+// ── Camera state ───────────────────────────────────────────────────────────────
+let rotX = 0, rotY = 0, targetX = 0, targetY = 0;
+let fov = 75, targetFov = 75;
+const SMOOTH = 0.10, ROT_SPEED = 0.003, AUTO_SPEED = 0.0003;
+let autoRotate = true, dragging = false, lastX = 0, lastY = 0;
+
+// ── Mouse ──────────────────────────────────────────────────────────────────────
+canvas.style.cursor = 'grab';
+canvas.addEventListener('mousedown', e => { dragging = true; lastX = e.clientX; lastY = e.clientY; canvas.style.cursor = 'grabbing'; });
+window.addEventListener('mouseup',   () => { dragging = false; canvas.style.cursor = 'grab'; });
+window.addEventListener('mousemove', e => {
+  if (!dragging) return;
+  targetY -= (e.clientX - lastX) * ROT_SPEED;
+  targetX -= (e.clientY - lastY) * ROT_SPEED;
+  targetX  = clamp(targetX, -Math.PI / 2, Math.PI / 2);
+  lastX = e.clientX; lastY = e.clientY;
+});
+
+canvas.addEventListener('wheel', e => {
+  e.preventDefault();
+  targetFov = clamp(targetFov + e.deltaY * 0.05, 20, 105);
+}, { passive: false });
+
+// ── Touch ──────────────────────────────────────────────────────────────────────
+let ltx = 0, lty = 0, lpinch = 0;
+canvas.addEventListener('touchstart', e => {
+  e.preventDefault();
+  if (e.touches.length === 1) { ltx = e.touches[0].clientX; lty = e.touches[0].clientY; }
+  if (e.touches.length === 2) lpinch = touchDist(e);
+}, { passive: false });
+canvas.addEventListener('touchmove', e => {
+  e.preventDefault();
+  if (e.touches.length === 1) {
+    targetY -= (e.touches[0].clientX - ltx) * ROT_SPEED;
+    targetX -= (e.touches[0].clientY - lty) * ROT_SPEED;
+    targetX = clamp(targetX, -Math.PI / 2, Math.PI / 2);
+    ltx = e.touches[0].clientX; lty = e.touches[0].clientY;
+  } else if (e.touches.length === 2) {
+    const d = touchDist(e);
+    targetFov = clamp(targetFov + (lpinch - d) * 0.15, 20, 105);
+    lpinch = d;
+  }
+}, { passive: false });
+
+// ── Keyboard ───────────────────────────────────────────────────────────────────
+window.addEventListener('keydown', e => {
+  if (e.key === 'ArrowLeft')  navigateTo(currentIndex - 1);
+  if (e.key === 'ArrowRight') navigateTo(currentIndex + 1);
+});
+
+// ── Navigation ─────────────────────────────────────────────────────────────────
+function navigateTo(i) {
+  const filled = slots.filter(Boolean).length;
+  if (filled < 2 || isLoading) return;
+  i = ((i % filled) + filled) % filled;
+  if (i === currentIndex) return;
+  currentIndex = i;
+  applyCurrentSlot();
+}
+
 function updateNav() {
   const filled = slots.filter(Boolean).length;
-  navEl.classList.toggle('visible', filled >= 2);
-
-  dotEls.forEach((dot, i) => {
-    dot.classList.toggle('loaded', Boolean(slots[i]));
+  document.getElementById('nav').classList.toggle('visible', filled >= 2);
+  document.querySelectorAll('.dot').forEach((dot, i) => {
     dot.classList.toggle('active', i === currentIndex);
     dot.style.opacity = slots[i] ? '1' : '0.25';
   });
 }
 
-// ── File loading (override defaults) ──────────────────────────────────────────
-const loadBtn   = document.getElementById('load-btn');
+document.getElementById('prev-btn').addEventListener('click', () => navigateTo(currentIndex - 1));
+document.getElementById('next-btn').addEventListener('click', () => navigateTo(currentIndex + 1));
+document.querySelectorAll('.dot').forEach(dot =>
+  dot.addEventListener('click', () => navigateTo(Number(dot.dataset.index)))
+);
+
+// ── File loading ───────────────────────────────────────────────────────────────
 const fileInput = document.getElementById('file-input');
-
-loadBtn.addEventListener('click', () => fileInput.click());
-
-fileInput.addEventListener('change', e => {
-  handleFiles(Array.from(e.target.files));
-  fileInput.value = '';
-});
+document.getElementById('load-btn').addEventListener('click', () => fileInput.click());
+fileInput.addEventListener('change', e => { handleFiles(Array.from(e.target.files)); fileInput.value = ''; });
 
 function handleFiles(files) {
-  const imageFiles = files.filter(f => f.type.startsWith('image/')).slice(0, MAX_IMAGES);
-  if (!imageFiles.length) return;
-
-  const firstEmpty = slots.findIndex(s => !s);
-  const startSlot  = firstEmpty === -1 ? 0 : firstEmpty;
-
-  imageFiles.forEach((file, i) => {
-    const slotIndex = (startSlot + i) % MAX_IMAGES;
-    // Revoke any previous blob URL (not data URIs from the offline build)
-    if (slots[slotIndex] && slots[slotIndex].startsWith('blob:')) {
-      URL.revokeObjectURL(slots[slotIndex]);
-    }
-    slots[slotIndex] = URL.createObjectURL(file);
+  const imgs = files.filter(f => f.type.startsWith('image/')).slice(0, 3);
+  if (!imgs.length) return;
+  const start = slots.findIndex(s => !s);
+  const from  = start === -1 ? 0 : start;
+  imgs.forEach((file, i) => {
+    const idx = (from + i) % 3;
+    if (slots[idx] && slots[idx].startsWith('blob:')) URL.revokeObjectURL(slots[idx]);
+    slots[idx] = URL.createObjectURL(file);
   });
-
-  currentIndex = startSlot % MAX_IMAGES;
+  currentIndex = from % 3;
   applyCurrentSlot();
 }
 
-// ── Drag-and-drop ──────────────────────────────────────────────────────────────
+// Drag-and-drop
 const dropOverlay = document.getElementById('dropzone-overlay');
-let dragCounter = 0;
+let dragCount = 0;
+document.addEventListener('dragenter', e => { e.preventDefault(); dragCount++; dropOverlay.classList.add('active'); });
+document.addEventListener('dragleave', () => { if (--dragCount <= 0) { dragCount = 0; dropOverlay.classList.remove('active'); } });
+document.addEventListener('dragover',  e => e.preventDefault());
+document.addEventListener('drop', e => { e.preventDefault(); dragCount = 0; dropOverlay.classList.remove('active'); handleFiles(Array.from(e.dataTransfer.files)); });
 
-document.addEventListener('dragenter', e => {
-  e.preventDefault();
-  dragCounter++;
-  dropOverlay.classList.add('active');
-});
-
-document.addEventListener('dragleave', () => {
-  dragCounter--;
-  if (dragCounter <= 0) { dragCounter = 0; dropOverlay.classList.remove('active'); }
-});
-
-document.addEventListener('dragover', e => e.preventDefault());
-
-document.addEventListener('drop', e => {
-  e.preventDefault();
-  dragCounter = 0;
-  dropOverlay.classList.remove('active');
-  handleFiles(Array.from(e.dataTransfer.files));
-});
-
-// ── Auto-rotate toggle ─────────────────────────────────────────────────────────
+// Auto-rotate toggle
 const autoBtn = document.getElementById('autorotate-btn');
-autoBtn.addEventListener('click', () => {
-  autoRotate = !autoRotate;
-  autoBtn.classList.toggle('active', autoRotate);
-});
+autoBtn.addEventListener('click', () => { autoRotate = !autoRotate; autoBtn.classList.toggle('active', autoRotate); });
+
+// ── Loading overlay ────────────────────────────────────────────────────────────
+function showLoading(on) {
+  isLoading = on;
+  document.getElementById('loading-overlay').classList.toggle('visible', on);
+}
 
 // ── Resize ─────────────────────────────────────────────────────────────────────
 window.addEventListener('resize', () => {
-  camera.aspect = window.innerWidth / window.innerHeight;
-  camera.updateProjectionMatrix();
-  renderer.setSize(window.innerWidth, window.innerHeight);
+  canvas.width  = window.innerWidth;
+  canvas.height = window.innerHeight;
+  gl.viewport(0, 0, canvas.width, canvas.height);
 });
 
-// ── Loading overlay ────────────────────────────────────────────────────────────
-const loadingOverlay = document.getElementById('loading-overlay');
-
-function showLoading(on) {
-  isLoading = on;
-  loadingOverlay.classList.toggle('visible', on);
-}
-
-// ── Startup: load the default images ──────────────────────────────────────────
+// ── Startup ────────────────────────────────────────────────────────────────────
+gl.enable(gl.DEPTH_TEST);
+gl.viewport(0, 0, canvas.width, canvas.height);
 DEFAULT_IMAGES.forEach((src, i) => { slots[i] = src; });
 updateNav();
 applyCurrentSlot();
 
-// ── Animation loop ─────────────────────────────────────────────────────────────
-function animate() {
-  requestAnimationFrame(animate);
-  applyKeyboard();
+// ── Render loop ────────────────────────────────────────────────────────────────
+function render() {
+  requestAnimationFrame(render);
 
-  if (autoRotate && !dragging) target.y -= AUTO_ROT_SPEED;
+  if (autoRotate && !dragging) targetY -= AUTO_SPEED;
+  rotX += (targetX - rotX) * SMOOTH;
+  rotY += (targetY - rotY) * SMOOTH;
+  fov  += (targetFov - fov) * 0.08;
 
-  rot.x += (target.x - rot.x) * SMOOTH;
-  rot.y += (target.y - rot.y) * SMOOTH;
+  gl.clearColor(0, 0, 0, 1);
+  gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
 
-  fov.cur += (fov.tgt - fov.cur) * ZOOM_SPEED;
-  camera.fov = fov.cur;
-  camera.updateProjectionMatrix();
+  if (!activeTexture) return;
 
-  camera.rotation.x = rot.x;
-  camera.rotation.y = rot.y;
+  const mvp = mat4Mul(perspective(fov, canvas.width / canvas.height, 0.1, 100), viewMatrix(rotY, rotX));
+  gl.uniformMatrix4fv(uMVP, false, mvp);
+  gl.uniform1i(uTex, 0);
 
-  renderer.render(scene, camera);
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, activeTexture);
+
+  gl.bindBuffer(gl.ARRAY_BUFFER, window._spherePosBuf);
+  gl.enableVertexAttribArray(aPos);
+  gl.vertexAttribPointer(aPos, 3, gl.FLOAT, false, 0, 0);
+
+  gl.bindBuffer(gl.ARRAY_BUFFER, window._sphereUVBuf);
+  gl.enableVertexAttribArray(aUV);
+  gl.vertexAttribPointer(aUV, 2, gl.FLOAT, false, 0, 0);
+
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, window._sphereIdxBuf);
+  gl.drawElements(gl.TRIANGLES, window._sphereIdxCount, gl.UNSIGNED_SHORT, 0);
 }
 
-animate();
+render();
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
-
-function pinchDist(e) {
-  return Math.hypot(
-    e.touches[0].clientX - e.touches[1].clientX,
-    e.touches[0].clientY - e.touches[1].clientY
-  );
-}
-
-// ── Placeholder texture (shown briefly while image 1 loads) ───────────────────
-function buildPlaceholderTexture() {
-  const W = 2048, H = 1024;
-  const canvas = document.createElement('canvas');
-  canvas.width = W; canvas.height = H;
-  const ctx = canvas.getContext('2d');
-
-  const sky = ctx.createLinearGradient(0, 0, 0, H * 0.58);
-  sky.addColorStop(0,   '#0b0f1a');
-  sky.addColorStop(0.5, '#0d1b3e');
-  sky.addColorStop(1,   '#1a3a6b');
-  ctx.fillStyle = sky;
-  ctx.fillRect(0, 0, W, H * 0.58);
-
-  const ground = ctx.createLinearGradient(0, H * 0.58, 0, H);
-  ground.addColorStop(0, '#1c3a10');
-  ground.addColorStop(1, '#0e1f08');
-  ctx.fillStyle = ground;
-  ctx.fillRect(0, H * 0.58, W, H * 0.42);
-
-  const rng = mulberry32(42);
-  for (let i = 0; i < 320; i++) {
-    const x = rng() * W, y = rng() * H * 0.54;
-    const r = rng() * 1.6 + 0.3, a = rng() * 0.6 + 0.4;
-    ctx.beginPath();
-    ctx.arc(x, y, r, 0, Math.PI * 2);
-    ctx.fillStyle = `rgba(255,255,255,${a.toFixed(2)})`;
-    ctx.fill();
-  }
-
-  return new THREE.CanvasTexture(canvas);
-}
-
-function mulberry32(seed) {
-  return function () {
-    seed |= 0; seed = seed + 0x6d2b79f5 | 0;
-    let t = Math.imul(seed ^ seed >>> 15, 1 | seed);
-    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
-    return ((t ^ t >>> 14) >>> 0) / 4294967296;
-  };
-}
+function touchDist(e) { return Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY); }

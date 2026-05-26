@@ -18,13 +18,21 @@ const material = new THREE.MeshBasicMaterial({ map: buildPlaceholderTexture() })
 const sphere = new THREE.Mesh(geometry, material);
 scene.add(sphere);
 
+// ── Default images — replaced with base64 data URIs in the offline build ───────
+const DEFAULT_IMAGES = [
+  'VR RENDER EXPERIENCE SIGNAL LOST ARCHIVE0440.png',
+  'VR RENDER EXPERIENCE SIGNAL LOST ARCHIVE1771.png',
+  'VR RENDER EXPERIENCE SIGNAL LOST ARCHIVE2846.png',
+];
+
 // ── Image slots ────────────────────────────────────────────────────────────────
-// Each slot stores the blob URL. We only keep ONE decoded THREE.Texture in GPU
-// memory at a time — the rest stay as cheap blob URLs until needed.
+// Slots hold a URL (path, blob URL, or data URI). Only one THREE.Texture lives
+// in GPU memory at a time; the old one is disposed before loading the next.
 const MAX_IMAGES = 3;
-const slots = [null, null, null]; // blob URL strings
+const slots = [null, null, null];
 let currentIndex = 0;
 let isLoading = false;
+let activeTexture = null; // the THREE.Texture currently mapped to the sphere
 
 // ── Camera state ───────────────────────────────────────────────────────────────
 const rot    = { x: 0, y: 0 };
@@ -104,12 +112,12 @@ cv.addEventListener('touchmove', e => {
   }
 }, { passive: false });
 
-// ── Keyboard ──────────────────────────────────────────────────────────────────
+// ── Keyboard — WASD pans; left/right arrows switch images ─────────────────────
 const keys = new Set();
 window.addEventListener('keydown', e => {
   keys.add(e.key);
-  if (e.key === 'ArrowLeft'  && !e.ctrlKey && !e.metaKey) navigateTo(currentIndex - 1);
-  if (e.key === 'ArrowRight' && !e.ctrlKey && !e.metaKey) navigateTo(currentIndex + 1);
+  if (e.key === 'ArrowLeft')  navigateTo(currentIndex - 1);
+  if (e.key === 'ArrowRight') navigateTo(currentIndex + 1);
 });
 window.addEventListener('keyup', e => keys.delete(e.key));
 
@@ -134,8 +142,6 @@ dotEls.forEach(dot => dot.addEventListener('click', () => navigateTo(Number(dot.
 function navigateTo(index) {
   const filled = slots.filter(Boolean).length;
   if (filled < 2 || isLoading) return;
-  // Wrap around within the loaded range only
-  const maxLoaded = filled - 1;
   index = ((index % filled) + filled) % filled;
   if (index === currentIndex) return;
   currentIndex = index;
@@ -147,14 +153,14 @@ function applyCurrentSlot() {
   if (!url) return;
 
   showLoading(true);
-  // Dispose the old texture to free GPU memory before loading the next one
-  if (material.map && material.map.isCanvasTexture === undefined) {
-    material.map.dispose();
-  }
+  // Reset view angle when switching images
+  target.x = 0; target.y = 0;
 
   new THREE.TextureLoader().load(
     url,
     tex => {
+      if (activeTexture) activeTexture.dispose();
+      activeTexture = tex;
       material.map = tex;
       material.needsUpdate = true;
       showLoading(false);
@@ -172,20 +178,11 @@ function updateNav() {
   dotEls.forEach((dot, i) => {
     dot.classList.toggle('loaded', Boolean(slots[i]));
     dot.classList.toggle('active', i === currentIndex);
-    // Hide dots for slots that will never be used if < 3 images loaded
-    dot.style.display = (i < MAX_IMAGES) ? '' : 'none';
-  });
-
-  // Dim dots for empty slots
-  dotEls.forEach((dot, i) => {
     dot.style.opacity = slots[i] ? '1' : '0.25';
   });
-
-  prevBtn.disabled = false;
-  nextBtn.disabled = false;
 }
 
-// ── File loading ───────────────────────────────────────────────────────────────
+// ── File loading (override defaults) ──────────────────────────────────────────
 const loadBtn   = document.getElementById('load-btn');
 const fileInput = document.getElementById('file-input');
 
@@ -197,22 +194,21 @@ fileInput.addEventListener('change', e => {
 });
 
 function handleFiles(files) {
-  // Accept up to MAX_IMAGES; fill slots starting from the first empty one,
-  // or overwrite from slot 0 if all are already filled.
   const imageFiles = files.filter(f => f.type.startsWith('image/')).slice(0, MAX_IMAGES);
   if (!imageFiles.length) return;
 
-  // Revoke old blob URLs to release memory before replacing
   const firstEmpty = slots.findIndex(s => !s);
   const startSlot  = firstEmpty === -1 ? 0 : firstEmpty;
 
   imageFiles.forEach((file, i) => {
     const slotIndex = (startSlot + i) % MAX_IMAGES;
-    if (slots[slotIndex]) URL.revokeObjectURL(slots[slotIndex]);
+    // Revoke any previous blob URL (not data URIs from the offline build)
+    if (slots[slotIndex] && slots[slotIndex].startsWith('blob:')) {
+      URL.revokeObjectURL(slots[slotIndex]);
+    }
     slots[slotIndex] = URL.createObjectURL(file);
   });
 
-  // Jump to the first newly loaded slot and display it
   currentIndex = startSlot % MAX_IMAGES;
   applyCurrentSlot();
 }
@@ -263,6 +259,11 @@ function showLoading(on) {
   loadingOverlay.classList.toggle('visible', on);
 }
 
+// ── Startup: load the default images ──────────────────────────────────────────
+DEFAULT_IMAGES.forEach((src, i) => { slots[i] = src; });
+updateNav();
+applyCurrentSlot();
+
 // ── Animation loop ─────────────────────────────────────────────────────────────
 function animate() {
   requestAnimationFrame(animate);
@@ -295,7 +296,7 @@ function pinchDist(e) {
   );
 }
 
-// ── Placeholder texture ────────────────────────────────────────────────────────
+// ── Placeholder texture (shown briefly while image 1 loads) ───────────────────
 function buildPlaceholderTexture() {
   const W = 2048, H = 1024;
   const canvas = document.createElement('canvas');
@@ -315,14 +316,6 @@ function buildPlaceholderTexture() {
   ctx.fillStyle = ground;
   ctx.fillRect(0, H * 0.58, W, H * 0.42);
 
-  const glow = ctx.createLinearGradient(0, H * 0.46, 0, H * 0.68);
-  glow.addColorStop(0,   'transparent');
-  glow.addColorStop(0.4, 'rgba(255,120,40,0.18)');
-  glow.addColorStop(0.6, 'rgba(255,80,10,0.12)');
-  glow.addColorStop(1,   'transparent');
-  ctx.fillStyle = glow;
-  ctx.fillRect(0, H * 0.46, W, H * 0.22);
-
   const rng = mulberry32(42);
   for (let i = 0; i < 320; i++) {
     const x = rng() * W, y = rng() * H * 0.54;
@@ -333,27 +326,7 @@ function buildPlaceholderTexture() {
     ctx.fill();
   }
 
-  ctx.strokeStyle = 'rgba(80,160,60,0.15)';
-  ctx.lineWidth = 1;
-  for (let i = 0; i < 20; i++) {
-    const x = (i / 20) * W;
-    ctx.beginPath(); ctx.moveTo(x, H * 0.58); ctx.lineTo(W / 2, H); ctx.stroke();
-  }
-  for (let j = 0; j < 8; j++) {
-    const y = H * 0.58 + (j / 8) * H * 0.42;
-    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
-  }
-
-  drawText(ctx, 'Load up to 3 panoramic images', W / 2, H / 2 - 14, 'bold 40px sans-serif', 'rgba(255,255,255,0.80)');
-  drawText(ctx, 'Click “Load Images” or drag & drop up to 3 files', W / 2, H / 2 + 44, '26px sans-serif', 'rgba(255,255,255,0.45)');
-
   return new THREE.CanvasTexture(canvas);
-}
-
-function drawText(ctx, text, x, y, font, color) {
-  ctx.font = font; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-  ctx.fillStyle = 'rgba(0,0,0,0.4)'; ctx.fillText(text, x + 2, y + 2);
-  ctx.fillStyle = color; ctx.fillText(text, x, y);
 }
 
 function mulberry32(seed) {

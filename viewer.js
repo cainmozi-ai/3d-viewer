@@ -64,7 +64,7 @@ const uTex = gl.getUniformLocation(prog, 'uTex');
       const theta = (j / H) * 2 * Math.PI;
       // Negate X to flip normals inward
       pos.push(-Math.sin(phi) * Math.cos(theta), Math.cos(phi), Math.sin(phi) * Math.sin(theta));
-      uvs.push(j / H, i / V);
+      uvs.push(1 - j / H, i / V);
     }
   }
 
